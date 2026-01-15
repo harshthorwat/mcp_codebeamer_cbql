@@ -6,17 +6,22 @@ from fastmcp.server.dependencies import get_http_headers
 
 from utils.codebeamer_client import CodebeamerClient
 from utils.errors import RateLimited
+from utils.cbql_validator import validate_cbql
+from utils.spec import MCP_SPEC
 
 class CodebeamerCBQL:
     def __init__(self) -> None:
         self.client = CodebeamerClient()
-        self.mcp = FastMCP("Codebeamer MCP")
+        self.mcp = FastMCP(
+                name="Codebeamer MCP",
+                instructions=MCP_SPEC
+            )
         self._register_tools()
 
     def _register_tools(self):
         
         @self.mcp.tool(
-            name="List projects",
+            name="list_projects",
             description="List all Codebeamer projects accessible to the current user."
         )
         async def list_projects():
@@ -40,7 +45,7 @@ class CodebeamerCBQL:
                 raise RuntimeError(f"RATE_LIMITED: {e.retry_after}")
             
         @self.mcp.tool(
-            name="List trackers",
+            name="list_trackers",
             description="List all trackers within a given Codebeamer project."
         )
         async def list_trackers(project_id: int):
@@ -65,14 +70,37 @@ class CodebeamerCBQL:
             }
         
         @self.mcp.tool(
-                name="query_items",
-                description="Always write one CBQL expression that returns all required items."
+            name="query_items",
+            description="""
+        Retrieve Codebeamer tracker items using CBQL.
+
+        MANDATORY RULES:
+        - CBQL MUST include tracker or project scope.
+        - Use a SINGLE CBQL query to retrieve all required items.
+        - Relations MUST use hasLinkTo(...).
+        - NEVER split queries by project or tracker.
+        - NEVER use SQL syntax or joins.
+
+        VALID EXAMPLES:
+        - tracker = 'Bugs' AND status = 'Open'
+        - tracker IN ('Requirements','Bugs') AND priority = 'High'
+        - tracker = 'Requirements' AND hasLinkTo(tracker='Test Cases')
+
+        INVALID:
+        - status = 'Open'
+        - SELECT * FROM items
+        """
         )
         async def query_items(
             ctx: Context,
             cbql: str, 
             page_size: Optional[int] = 500
         ):
+            try:
+                cbql = validate_cbql(cbql)
+            except ValueError as e:
+                raise RuntimeError(f"INVALID_CBQL:{str(e)}")
+            
             received_headers = get_http_headers()
             access_token = received_headers.get("authorization") or received_headers.get("Authorization") or received_headers.get("x-access-token")
 
@@ -120,8 +148,15 @@ class CodebeamerCBQL:
                 raise RuntimeError(f"RATE_LIMITED: {e.retry_after}")
 
         @self.mcp.tool(
-            name="extend_relations",
-            description="Fetch upstream and downstream relations for multiple items in bulk."
+            name="expand_relations",
+            description="""
+        Fetch upstream and downstream relations for multiple items.
+
+        RULES:
+        - Use this ONLY after query_items.
+        - Provide item IDs obtained from CBQL results.
+        - Do NOT use this tool to discover items.
+        """
         )
         async def expand_relations(item_ids: list[int]):
             received_headers = get_http_headers()
@@ -141,13 +176,25 @@ class CodebeamerCBQL:
             }
         
         @self.mcp.tool(
-                name="bulk_update_items", 
-                description="Update fields for multiple Codebeamer items in a single request."
+            name="bulk_update_items",
+            description="""
+        Update fields for multiple Codebeamer items in one request.
+
+        RULES:
+        - Items must be obtained via query_items.
+        - Do NOT update items one by one.
+        - Confirm intent before calling this tool.
+        """
         )
         async def bulk_update_items(
             updates: list[dict],
             atomic: bool = True
         ):
+            if not updates or len(updates) > 500:
+                raise RuntimeError(
+                    "INVALID_UPDATE: updates must be between 1 and 500 items"
+                )
+            
             received_headers = get_http_headers()
             access_token = received_headers.get("authorization") or received_headers.get("Authorization") or received_headers.get("x-access-token")
 
@@ -594,18 +641,18 @@ class CodebeamerCBQL:
             return {"baseline": baseline}
 
 
-        def start(self):
-            try:
-                self.mcp.run(
-                    transport="streamable-http",
-                    host="0.0.0.0",
-                    port=8000,
-                )
-            except Exception as e:
-                logging.exception(
-                    f"Failed to start Codebeamer CBQL MCP server with error: {e}"
-                )
-        
+    def start(self):
+        try:
+            self.mcp.run(
+                transport="streamable-http",
+                host="0.0.0.0",
+                port=8000,
+            )
+        except Exception as e:
+            logging.exception(
+                f"Failed to start Codebeamer CBQL MCP server with error: {e}"
+            )
+    
 
 if __name__ == "__main__":
     server = CodebeamerCBQL()
